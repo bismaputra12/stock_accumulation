@@ -79,4 +79,30 @@ if st.sidebar.button("🔍 START FULL MARKET SCAN"):
         for i, future in enumerate(futures):
             res = future.result()
             if res:
-                s
+                st.session_state.scan_results.append(res)
+                found_count += 1
+                live_feed.markdown(f"✅ **Match Found:** {res['Ticker']} (Vol: {res['Vol_Ratio']}x)")
+            
+            if i % 20 == 0:
+                progress_bar.progress((i + 1) / len(tickers))
+                status_msg.text(f"Scanning {i}/{len(tickers)} stocks... Found {found_count} alerts so far.")
+
+    status_msg.success(f"Scan complete. Total matches: {found_count}")
+
+# --- RESULTS ---
+if st.session_state.scan_results:
+    df_res = pd.DataFrame(st.session_state.scan_results).sort_values(by="Vol_Ratio", ascending=False)
+    st.subheader("📋 Detected Signals")
+    st.dataframe(df_res, use_container_width=True)
+    
+    st.divider()
+    for r in st.session_state.scan_results[:10]: # Show charts for top 10
+        with st.expander(f"CHART: {r['Ticker']} ({r['Type']})"):
+            c_data = yf.download(f"{r['Ticker']}.JK", period="3mo", progress=False)
+            if hasattr(c_data.columns, 'nlevels') and c_data.columns.nlevels > 1:
+                c_data.columns = c_data.columns.get_level_values(0)
+            fig = go.Figure(data=[go.Candlestick(x=c_data.index, open=c_data['Open'], high=c_data['High'], low=c_data['Low'], close=c_data['Close'])])
+            fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,b=0,t=0))
+            st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Scanner ready. Click the button to analyze the market.")
