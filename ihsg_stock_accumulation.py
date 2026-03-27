@@ -44,4 +44,61 @@ def analyze_stock(ticker, sens_vol, sens_price):
         # ACCUMULATION LOGIC
         # Tight price change + High volume = Smart money entry
         if vol_ratio >= sens_vol and abs(price_change) <= sens_price:
-            return {"Ticker": ticker, "Price": last_price, "Change%": round(price_change,
+            return {"Ticker": ticker, "Price": last_price, "Change%": round(price_change, 2), "Vol_Ratio": round(vol_ratio, 2), "Signal": "Accumulation 💎"}
+        
+        # MARKUP LOGIC
+        elif vol_ratio >= (sens_vol + 0.5) and price_change > 1.5:
+            return {"Ticker": ticker, "Price": last_price, "Change%": round(price_change, 2), "Vol_Ratio": round(vol_ratio, 2), "Signal": "Aggressive Markup 🚀"}
+            
+        return None
+    except:
+        return None
+
+# --- UI CONTROLS ---
+tickers = get_master_list()
+st.sidebar.success(f"✅ Master Database Loaded: **{len(tickers)} Stocks**")
+
+sens_vol = st.sidebar.slider("Volume Sensitivity (1.1x = sensitive, 2.0x = strict)", 1.0, 3.0, 1.2)
+sens_price = st.sidebar.slider("Price Threshold (Max % move for Accumulation)", 0.1, 5.0, 1.5)
+
+if 'scan_results' not in st.session_state:
+    st.session_state.scan_results = []
+
+if st.sidebar.button("🔍 Run Full Market Scan"):
+    st.session_state.scan_results = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Process the entire list
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        futures = {executor.submit(analyze_stock, t, sens_vol, sens_price): t for t in tickers}
+        
+        for i, future in enumerate(futures):
+            res = future.result()
+            if res:
+                st.session_state.scan_results.append(res)
+            
+            # Progress update
+            if i % 30 == 0:
+                progress = (i + 1) / len(tickers)
+                progress_bar.progress(progress)
+                status_text.text(f"Scanning stock {i} of {len(tickers)}...")
+
+    status_text.success(f"Scan complete! Analyzed {len(tickers)} tickers. Found {len(st.session_state.scan_results)} alerts.")
+
+# --- RESULTS ---
+if st.session_state.scan_results:
+    df_res = pd.DataFrame(st.session_state.scan_results).sort_values(by="Vol_Ratio", ascending=False)
+    st.subheader(f"📊 {len(df_res)} Whale Alerts Detected")
+    st.dataframe(df_res, use_container_width=True)
+    
+    for r in st.session_state.scan_results:
+        with st.expander(f"CHART: {r['Ticker']} ({r['Signal']})"):
+            c_data = yf.download(f"{r['Ticker']}.JK", period="3mo", progress=False)
+            if isinstance(c_data.columns, pd.MultiIndex): c_data.columns = c_data.columns.get_level_values(0)
+            
+            fig = go.Figure(data=[go.Candlestick(x=c_data.index, open=c_data['Open'], high=c_data['High'], low=c_data['Low'], close=c_data['Close'])])
+            fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,b=0,t=0))
+            st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("The scanner is ready to analyze the full IDX. Click 'Run Full Market Scan' in the sidebar.")
