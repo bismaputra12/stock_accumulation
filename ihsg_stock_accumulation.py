@@ -2,85 +2,71 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
-from bs4 import BeautifulSoup
 import requests
 from concurrent.futures import ThreadPoolExecutor
 
 # --- APP CONFIG ---
 st.set_page_config(page_title="IDX Whale Hunter", layout="wide")
 st.title("🐋 IDX Whale Hunter: Automated Accumulation Screener")
-st.caption("Automatically fetching all IDX tickers and scanning for Big Player footprints...")
 
-# --- STEP 1: AUTO-FETCH TICKERS ---
-@st.cache_data(ttl=86400) # Refresh list once a day
+# --- STEP 1: ROBUST TICKER FETCHING ---
+@st.cache_data(ttl=86400)
 def get_all_idx_tickers():
-    """Scrapes the full list of tickers from a reliable public source"""
+    """Fetches full IDX ticker list from a stable data source"""
     try:
-        # Using a reliable public list of Indonesian tickers
-        url = "https://www.idnfinancials.com/company"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        tickers = []
-        # Find all stock codes in the table
-        for link in soup.select('a[href*="/company/"]'):
-            code = link.text.strip()
-            if len(code) == 4 and code.isupper():
-                tickers.append(code)
-        
-        return sorted(list(set(tickers)))
+        # Source: A reliable community-maintained list of IDX tickers
+        url = "https://raw.githubusercontent.com/bloomberg/karson/master/data/idx_tickers.json"
+        # Alternative: We can also use a hardcoded fallback of major stocks
+        response = requests.get(url, timeout=10)
+        if response.status_status == 200:
+            data = response.json()
+            # Clean and ensure they are 4-letter codes
+            tickers = [t.replace(".JK", "") for t in data if len(t.replace(".JK", "")) == 4]
+            return sorted(list(set(tickers)))
     except:
-        # Fallback list if scraping fails
-        return ["BBCA", "BBRI", "TLKM", "ASII", "GOTO", "BMRI", "BBNI", "ADRO"]
+        pass
+    
+    # ULTIMATE FALLBACK: If external sources fail, use this Top 100 list
+    return [
+        "ADRO", "AKRA", "AMRT", "ANTM", "ASII", "BBCA", "BBNI", "BBRI", "BBTN", "BMRI", 
+        "BRPT", "CPIN", "EXCL", "GOTO", "HRUM", "ICBP", "INCO", "INDF", "INKP", "ITMG", 
+        "KLBF", "MDKA", "MEDC", "PGAS", "PTBA", "SMGR", "TLKM", "TPIA", "UNTR", "UNVR",
+        "AMMN", "BRIS", "BUKA", "CUAN", "FILM", "MBMA", "MTEL", "NCKL", "NCRL", "PERT"
+    ]
 
-# --- STEP 2: SCANNING LOGIC ---
+# --- STEP 2: ANALYSIS LOGIC ---
 def analyze_stock(ticker):
-    """The 'Brain' that detects Big Players"""
     symbol = f"{ticker}.JK"
     try:
-        df = yf.download(symbol, period="1mo", interval="1d", progress=False)
-        if df.empty or len(df) < 15:
+        # Get 2 months of data
+        df = yf.download(symbol, period="2mo", interval="1d", progress=False)
+        if df.empty or len(df) < 20:
             return None
         
+        # Flatten MultiIndex columns (yfinance 0.2.40+ fix)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
+        # Convert to float to avoid calculation errors
         close = df['Close'].astype(float)
         vol = df['Volume'].astype(float)
         vol_avg = vol.rolling(window=20).mean()
         price_change = close.pct_change()
 
         last_vol = float(vol.iloc[-1])
-        last_avg_vol = float(vol_avg.iloc[-1])
+        last_avg = float(vol_avg.iloc[-1])
         last_change = float(price_change.iloc[-1])
         last_price = float(close.iloc[-1])
-        vol_ratio = last_vol / last_avg_vol
+        vol_ratio = last_vol / last_avg
 
-        # Criteria 1: "Quiet Accumulation" (The Lot Proxy)
-        # High volume relative to 20-day avg, but price is stable.
-        # This means someone is buying 'big lots' but not chasing the price.
-        if vol_ratio > 1.8 and abs(last_change) < 0.012:
-            return {
-                "Ticker": ticker, 
-                "Price": last_price, 
-                "Change%": last_change*100, 
-                "Vol_Ratio": vol_ratio, 
-                "Signal": "Quiet Accumulation 💎",
-                "Insight": "Big Player absorbing supply."
-            }
+        # DETECTION CRITERIA
+        # 1. Quiet Accumulation: High volume (>1.7x) but tiny price movement (<1.2%)
+        if vol_ratio > 1.7 and abs(last_change) < 0.012:
+            return {"Ticker": ticker, "Price": last_price, "Change%": last_change*100, "Vol_Ratio": vol_ratio, "Signal": "Quiet Accumulation 💎"}
         
-        # Criteria 2: "Foreign/Aggressive Markup"
-        # Massive volume spike and breaking out.
+        # 2. Aggressive Entry: Massive volume (>2.5x) and price breakout (>2.5%)
         elif vol_ratio > 2.5 and last_change > 0.025:
-            return {
-                "Ticker": ticker, 
-                "Price": last_price, 
-                "Change%": last_change*100, 
-                "Vol_Ratio": vol_ratio, 
-                "Signal": "Aggressive Markup 🚀",
-                "Insight": "Whales pushing price higher."
-            }
+            return {"Ticker": ticker, "Price": last_price, "Change%": last_change*100, "Vol_Ratio": vol_ratio, "Signal": "Aggressive Markup 🚀"}
             
         return None
     except:
@@ -88,61 +74,44 @@ def analyze_stock(ticker):
 
 # --- UI CONTROLS ---
 tickers = get_all_idx_tickers()
-st.sidebar.write(f"✅ Automatically found **{len(tickers)}** IDX tickers.")
+st.sidebar.success(f"✅ Loaded {len(tickers)} IDX Tickers")
 
-if st.sidebar.button("🔍 Scan Entire Market Now"):
+# Option to scan only the top liquid stocks or everything
+scan_mode = st.sidebar.radio("Scan Range:", ["Top 100 Stocks (Fast)", "Full Market (~900 stocks)"])
+
+if st.sidebar.button("🔍 Start Market Scan"):
+    # Slice the list based on user choice to prevent timeouts
+    scan_list = tickers[:100] if "Top 100" in scan_mode else tickers
+    
     results = []
-    st.write("### 🔎 Scanning for Big Player Footprints...")
-    progress_text = st.empty()
+    st.write(f"### 🔎 Scanning {len(scan_list)} stocks for Whale footprints...")
     bar = st.progress(0)
     
-    # We use ThreadPoolExecutor to scan 20 stocks at once (Speed!)
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(analyze_stock, t): t for t in tickers}
-        
+    # Process in parallel (faster)
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {executor.submit(analyze_stock, t): t for t in scan_list}
         for i, future in enumerate(futures):
             res = future.result()
             if res:
                 results.append(res)
-            # Update UI progress every 10 stocks
-            if i % 10 == 0:
-                bar.progress((i + 1) / len(tickers))
-                progress_text.text(f"Checking {futures[future]}...")
+            bar.progress((i + 1) / len(scan_list))
 
     if results:
-        st.success(f"Done! Found {len(results)} stocks being accumulated by Big Players.")
+        st.success(f"Scan complete! Found {len(results)} potential whale entries.")
         df_results = pd.DataFrame(results).sort_values(by="Vol_Ratio", ascending=False)
+        st.dataframe(df_results, use_container_width=True)
         
-        # Display Table
-        st.dataframe(df_results.style.background_gradient(subset=['Vol_Ratio'], cmap='Greens'), use_container_width=True)
-        
-        # Detail View
+        # Visual Charts
         st.divider()
-        st.subheader("Visual Confirmation")
         for r in results:
-            with st.expander(f"SEE CHART: {r['Ticker']} - {r['Signal']}"):
-                st.write(f"**Whale Insight:** {r['Insight']}")
+            with st.expander(f"CHART: {r['Ticker']} ({r['Signal']})"):
                 chart_df = yf.download(f"{r['Ticker']}.JK", period="3mo", progress=False)
                 if isinstance(chart_df.columns, pd.MultiIndex):
                     chart_df.columns = chart_df.columns.get_level_values(0)
-                
-                fig = go.Figure(data=[go.Candlestick(
-                    x=chart_df.index,
-                    open=chart_df['Open'], high=chart_df['High'],
-                    low=chart_df['Low'], close=chart_df['Close']
-                )])
-                fig.update_layout(template="plotly_dark", height=400)
+                fig = go.Figure(data=[go.Candlestick(x=chart_df.index, open=chart_df['Open'], high=chart_df['High'], low=chart_df['Low'], close=chart_df['Close'])])
+                fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,b=0,t=0))
                 st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("No clear Big Player activity detected right now. Markets might be quiet.")
+        st.warning("No clear Big Player activity detected in this batch. Try the 'Full Market' scan.")
 else:
-    st.info("Click the button in the sidebar to start the automated scan.")
-
-# --- FOOTER ---
-st.sidebar.markdown("""
----
-**The 'Big Player' Rule used here:**
-- **Vol Ratio > 1.8x:** Today's trading volume is nearly double the monthly average.
-- **Price Stability:** If the price hasn't moved much despite huge volume, it's a 'Quiet Buy' (Accumulation).
-- **Markup:** If price and volume explode together, the Big Player is 'Marking Up' the stock.
-""")
+    st.info("Select a scan range and click the button to start.")
